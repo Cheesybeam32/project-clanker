@@ -7,13 +7,21 @@ sp = spm.SentencePieceProcessor()
 sp.load("spm.model")
 S_vocab = sp.vocab_size()
 
-Cells = 8
+Cells = 2
 Dims = 16
-Bounds = 1024
+Bounds = 512
 LR = 0.001
+Threshold = 0
+H_random = 0.01
+L_random = -0.01
+Gpu = True
 
-torch.set_num_threads(6)
-torch.set_num_interop_threads(2)
+if Gpu:
+    torch.set_default_device("xpu")
+else:
+    torch.set_default_device("cpu")
+    torch.set_num_threads(8)
+    torch.set_num_interop_threads(2)
 def load():
     while True:
         with open('dataset.txt', 'r', encoding='utf-8') as data:
@@ -23,14 +31,14 @@ def load():
 
 class Brain(torch.nn.Module):
     def init(self):
-        self.V_embed = torch.nn.Parameter(torch.empty(S_vocab, Dims).uniform_(-0.01, 0.01))
-        self.Input = torch.nn.Parameter(torch.empty(Cells, Dims).uniform_(-0.01, 0.01))
+        self.V_embed = torch.nn.Parameter(torch.empty(S_vocab, Dims).uniform_(L_random, H_random))
+        self.Input = torch.nn.Parameter(torch.empty(Cells, Dims).uniform_(L_random, H_random))
         self.Cells = torch.zeros(Cells, Dims)
-        self.Weights = torch.nn.Parameter(torch.empty(Bounds, Dims).uniform_(-0.01, 0.01))
-        self.D_Mixer = torch.nn.Parameter(torch.empty(Dims, Dims).uniform_(-0.01, 0.01))
-        self.Add = torch.nn.Parameter(torch.empty(Cells, Dims).uniform_(-0.01, 0.01))
-        self.C_Mixer = torch.nn.Parameter(torch.empty(Cells).uniform_(-0.01, 0.01))
-        self.Forget = torch.nn.Parameter(torch.empty(Cells, Dims).uniform_(-0.01, 0.01))
+        self.Weights = torch.nn.Parameter(torch.empty(Bounds, Dims).uniform_(L_random, H_random))
+        self.D_Mixer = torch.nn.Parameter(torch.empty(Dims, Dims).uniform_(L_random, H_random))
+        self.Add = torch.nn.Parameter(torch.empty(Cells, Dims).uniform_(L_random, H_random))
+        self.C_Mixer = torch.nn.Parameter(torch.empty(Cells).uniform_(L_random, H_random))
+        self.Forget = torch.nn.Parameter(torch.empty(Cells, Dims).uniform_(L_random, H_random))
     def reset(self):
         self.Cells = torch.zeros(Cells, Dims)
     def input(self, pred_miku):
@@ -42,12 +50,14 @@ class Brain(torch.nn.Module):
     def main_grid(self):
         cell_expand = self.Cells[:, None, :].clone()
         weight_expand = self.Weights[None, :, :]
-        multipled = cell_expand * weight_expand
+        cell_norm = torch.nn.functional.normalize(cell_expand, p=2, dim=2)
+        weight_norm = torch.nn.functional.normalize(weight_expand, p=2, dim=2)
+        multipled = cell_norm * weight_norm
+        #SPARSIFY THIS LATER THRU ARRAY ORDERING, DO NOT FORGET
         dot = torch.sum(multipled, dim=2)
-        #soft_dot = torch.softmax(dot, dim=1)
-        #sig_dot = torch.sigmoid(dot)
-        #relu_dot = torch.relu(dot)
-        output = torch.matmul(dot, self.Weights)
+        out_dot = torch.where(dot >= Threshold, dot, 0.0)
+        out_grid = weight_expand * out_dot[:, :, None]
+        output = torch.sum(out_grid, dim=1)
         return output
     def cell_upd(self, output):
         forget_gate = torch.sigmoid(self.Forget)
